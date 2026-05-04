@@ -5,37 +5,48 @@ A股：AkShare（免费，无需 API Key）
 自动根据股票代码格式判断市场
 """
 
+import time
 import yfinance as yf
 import akshare as ak
 import pandas as pd
 
 
 # ─────────────────────────────────────────
+# 重试装饰器（应对 Streamlit Cloud 上 yfinance 偶发失败）
+# ─────────────────────────────────────────
+def _retry(func, retries: int = 2, delay: float = 0.5):
+    """简单重试，失败返回 None"""
+    for i in range(retries + 1):
+        try:
+            result = func()
+            if result is not None:
+                return result
+        except Exception:
+            pass
+        if i < retries:
+            time.sleep(delay)
+    return None
+
+
+# ─────────────────────────────────────────
 # 市场判断与代码标准化
 # ─────────────────────────────────────────
 def detect_market(ticker: str) -> str:
-    """
-    根据 ticker 格式判断市场
-    返回 'us' 或 'cn'
-    """
+    """根据 ticker 格式判断市场，返回 'us' 或 'cn'"""
     if not ticker:
         return "us"
     ticker = ticker.strip().upper()
-    # 纯 6 位数字 → A 股
     if ticker.isdigit() and len(ticker) == 6:
         return "cn"
-    # 包含 A 股交易所后缀
     if any(suffix in ticker for suffix in [".SS", ".SZ", ".SH", ".BJ"]):
         return "cn"
-    # 默认美股
     return "us"
 
 
 def normalize_ticker(ticker: str, market: str) -> str:
-    """标准化 ticker 格式，方便各数据源使用"""
+    """标准化 ticker 格式"""
     ticker = ticker.strip().upper()
     if market == "cn":
-        # 提取 6 位数字代码
         digits = "".join(c for c in ticker if c.isdigit())[:6]
         return digits if len(digits) == 6 else ticker
     return ticker
@@ -47,8 +58,8 @@ def normalize_ticker(ticker: str, market: str) -> str:
 def get_company_info(ticker: str) -> dict | None:
     """
     根据 ticker 拉取公司基本信息
-    返回：{"ticker": "AAPL", "market": "us", "name": "Apple Inc.", ...}
-    找不到返回 None
+    美股：信任 ticker 本身，即使 yfinance info 失败也返回最小信息
+    A股：用 AkShare 验证
     """
     market = detect_market(ticker)
     norm_ticker = normalize_ticker(ticker, market)
@@ -59,30 +70,35 @@ def get_company_info(ticker: str) -> dict | None:
         return _get_cn_company_info(norm_ticker)
 
 
-def _get_us_company_info(ticker: str) -> dict | None:
-    """yfinance 拉美股公司信息"""
+def _get_us_company_info(ticker: str) -> dict:
+    """
+    美股公司信息：信任 ticker，即使拉不到详细 info 也返回基础信息
+    避免 yfinance 在 Streamlit Cloud 上间歇性失败导致整个流程中断
+    """
     try:
         stock = yf.Ticker(ticker)
-        info = stock.info
-        # 验证是不是有效 ticker
-        if not info or "longName" not in info and "shortName" not in info:
-            return None
+        info = stock.info or {}
+        name = info.get("longName") or info.get("shortName") or ticker
         return {
             "ticker": ticker,
             "market": "us",
-            "name": info.get("longName") or info.get("shortName") or ticker,
+            "name": name,
             "industry": info.get("industry"),
             "sector": info.get("sector"),
-            "summary": info.get("longBusinessSummary", "")[:300],
+            "summary": (info.get("longBusinessSummary") or "")[:300],
         }
     except Exception:
-        return None
+        # yfinance 失败时仍返回最小信息，让流程继续
+        return {
+            "ticker": ticker,
+            "market": "us",
+            "name": ticker,
+        }
 
 
 def _get_cn_company_info(ticker: str) -> dict | None:
-    """AkShare 拉 A 股公司信息"""
-    try:
-        # 拉取 A 股全量列表，匹配代码
+    """A 股公司信息：通过 AkShare 验证"""
+    def _fetch():
         df = ak.stock_info_a_code_name()
         matched = df[df["code"] == ticker]
         if matched.empty:
@@ -92,18 +108,15 @@ def _get_cn_company_info(ticker: str) -> dict | None:
             "market": "cn",
             "name": matched.iloc[0]["name"],
         }
-    except Exception:
-        return None
+
+    return _retry(_fetch, retries=1)
 
 
 # ─────────────────────────────────────────
-# 财务数据获取（统一入口）
+# 财务数据获取
 # ─────────────────────────────────────────
 def get_financial_data(ticker: str, period: str) -> dict:
-    """
-    根据 ticker 自动判断市场，拉取对应财务数据
-    period: 年份字符串，如 "2024"
-    """
+    """根据 ticker 自动判断市场，拉取对应财务数据"""
     market = detect_market(ticker)
     norm_ticker = normalize_ticker(ticker, market)
 
@@ -121,23 +134,24 @@ def _get_us_financial_data(ticker: str, period: str) -> dict:
 
     try:
         stock = yf.Ticker(ticker)
-        info = stock.info
+        info = _retry(lambda: stock.info, retries=2) or {}
 
         # ── 估值数据 ──
-        result["valuation"] = {
-            "PE (TTM)": _round(info.get("trailingPE")),
-            "Forward PE": _round(info.get("forwardPE")),
-            "PB": _round(info.get("priceToBook")),
-            "PS (TTM)": _round(info.get("priceToSalesTrailing12Months")),
-            "Market Cap (B)": _round(info.get("marketCap", 0) / 1e9, 2),
-            "Dividend Yield (%)": _round((info.get("dividendYield") or 0) * 100, 2),
-            "52W High": _round(info.get("fiftyTwoWeekHigh")),
-            "52W Low": _round(info.get("fiftyTwoWeekLow")),
-            "Beta": _round(info.get("beta")),
-        }
+        if info:
+            result["valuation"] = {
+                "PE (TTM)": _round(info.get("trailingPE")),
+                "Forward PE": _round(info.get("forwardPE")),
+                "PB": _round(info.get("priceToBook")),
+                "PS (TTM)": _round(info.get("priceToSalesTrailing12Months")),
+                "Market Cap (B)": _round((info.get("marketCap") or 0) / 1e9, 2),
+                "Dividend Yield (%)": _round((info.get("dividendYield") or 0) * 100, 2),
+                "52W High": _round(info.get("fiftyTwoWeekHigh")),
+                "52W Low": _round(info.get("fiftyTwoWeekLow")),
+                "Beta": _round(info.get("beta")),
+            }
 
         # ── 利润表 ──
-        income = stock.income_stmt
+        income = _retry(lambda: stock.income_stmt, retries=2)
         if income is not None and not income.empty:
             col = _find_year_column(income.columns, period)
             if col is not None:
@@ -149,7 +163,6 @@ def _get_us_financial_data(ticker: str, period: str) -> dict:
                     "Net Income (B)": _to_billion(row.get("Net Income")),
                     "EPS (Basic)": _round(row.get("Basic EPS")),
                 }
-                # 计算利润率
                 rev = row.get("Total Revenue")
                 if rev and rev > 0:
                     gp = row.get("Gross Profit")
@@ -160,7 +173,7 @@ def _get_us_financial_data(ticker: str, period: str) -> dict:
                         result["income"]["Net Margin (%)"] = _round(ni / rev * 100, 2)
 
         # ── 资产负债表 ──
-        balance = stock.balance_sheet
+        balance = _retry(lambda: stock.balance_sheet, retries=2)
         if balance is not None and not balance.empty:
             col = _find_year_column(balance.columns, period)
             if col is not None:
@@ -178,7 +191,7 @@ def _get_us_financial_data(ticker: str, period: str) -> dict:
                     result["balance"]["Debt-to-Asset Ratio (%)"] = _round(total_liab / total_assets * 100, 2)
 
         # ── 现金流 ──
-        cashflow = stock.cashflow
+        cashflow = _retry(lambda: stock.cashflow, retries=2)
         if cashflow is not None and not cashflow.empty:
             col = _find_year_column(cashflow.columns, period)
             if col is not None:
@@ -189,13 +202,15 @@ def _get_us_financial_data(ticker: str, period: str) -> dict:
                     "Free Cash Flow (B)": _to_billion(row.get("Free Cash Flow")),
                 }
 
-        # ── 关键指标计算 ──
+        # ── ROE 计算 ──
         if "income" in result and "balance" in result:
             try:
-                ni = stock.income_stmt[col].get("Net Income") if col is not None else None
-                eq = stock.balance_sheet[col].get("Stockholders Equity") if col is not None else None
-                if ni and eq and eq > 0:
-                    result.setdefault("indicators", {})["ROE (%)"] = _round(ni / eq * 100, 2)
+                if income is not None and balance is not None:
+                    col = _find_year_column(income.columns, period)
+                    ni = income[col].get("Net Income") if col is not None else None
+                    eq = balance[col].get("Stockholders Equity") if col is not None else None
+                    if ni and eq and eq > 0:
+                        result.setdefault("indicators", {})["ROE (%)"] = _round(ni / eq * 100, 2)
             except Exception:
                 pass
 
@@ -211,32 +226,31 @@ def _get_us_financial_data(ticker: str, period: str) -> dict:
 def _get_cn_financial_data(ticker: str, period: str) -> dict:
     result = {"market": "cn", "ticker": ticker, "period": period}
 
-    # ── 估值数据（实时行情）──
+    # 实时行情（估值）
     try:
-        spot = ak.stock_zh_a_spot_em()
-        matched = spot[spot["代码"] == ticker]
-        if not matched.empty:
-            row = matched.iloc[0]
-            result["valuation"] = {
-                "PE (TTM)": _round(row.get("市盈率-动态")),
-                "PB": _round(row.get("市净率")),
-                "总市值(亿元)": _round((row.get("总市值") or 0) / 1e8, 2),
-                "流通市值(亿元)": _round((row.get("流通市值") or 0) / 1e8, 2),
-                "最新价": _round(row.get("最新价")),
-                "52周最高": _round(row.get("52周最高")),
-                "52周最低": _round(row.get("52周最低")),
-            }
+        spot = _retry(lambda: ak.stock_zh_a_spot_em(), retries=1)
+        if spot is not None:
+            matched = spot[spot["代码"] == ticker]
+            if not matched.empty:
+                row = matched.iloc[0]
+                result["valuation"] = {
+                    "PE (TTM)": _round(row.get("市盈率-动态")),
+                    "PB": _round(row.get("市净率")),
+                    "总市值(亿元)": _round((row.get("总市值") or 0) / 1e8, 2),
+                    "流通市值(亿元)": _round((row.get("流通市值") or 0) / 1e8, 2),
+                    "最新价": _round(row.get("最新价")),
+                    "52周最高": _round(row.get("52周最高")),
+                    "52周最低": _round(row.get("52周最低")),
+                }
     except Exception as e:
         result["valuation_error"] = str(e)
 
-    # ── 财务摘要（包含核心指标）──
+    # 财务摘要
     try:
-        abstract = ak.stock_financial_abstract(symbol=ticker)
+        abstract = _retry(lambda: ak.stock_financial_abstract(symbol=ticker), retries=1)
         if abstract is not None and not abstract.empty:
-            # 找到对应年报列（YYYY1231）
             year_col = f"{period}1231"
             if year_col in abstract.columns:
-                # 提取关键指标
                 indicators_row = {}
                 for _, r in abstract.iterrows():
                     key = r.get("指标")
@@ -244,7 +258,6 @@ def _get_cn_financial_data(ticker: str, period: str) -> dict:
                     if key and pd.notna(val):
                         indicators_row[key] = val
 
-                # 利润表数据
                 result["income"] = {
                     "营业总收入(亿元)": _to_yi(indicators_row.get("营业总收入")),
                     "归母净利润(亿元)": _to_yi(indicators_row.get("归母净利润")),
@@ -253,7 +266,6 @@ def _get_cn_financial_data(ticker: str, period: str) -> dict:
                     "归母净利润同比增长(%)": _round(indicators_row.get("归母净利润同比增长")),
                 }
 
-                # 关键指标
                 result["indicators"] = {
                     "ROE(%)": _round(indicators_row.get("净资产收益率")),
                     "毛利率(%)": _round(indicators_row.get("销售毛利率")),
@@ -262,7 +274,6 @@ def _get_cn_financial_data(ticker: str, period: str) -> dict:
                     "每股净资产(元)": _round(indicators_row.get("每股净资产")),
                 }
 
-                # 资产负债数据
                 result["balance"] = {
                     "总资产(亿元)": _to_yi(indicators_row.get("资产总计")),
                     "总负债(亿元)": _to_yi(indicators_row.get("负债合计")),
@@ -270,7 +281,6 @@ def _get_cn_financial_data(ticker: str, period: str) -> dict:
                     "资产负债率(%)": _round(indicators_row.get("资产负债率")),
                 }
 
-                # 现金流
                 result["cashflow"] = {
                     "经营现金流(亿元)": _to_yi(indicators_row.get("经营活动产生的现金流量净额")),
                     "投资现金流(亿元)": _to_yi(indicators_row.get("投资活动产生的现金流量净额")),
@@ -286,25 +296,32 @@ def _get_cn_financial_data(ticker: str, period: str) -> dict:
 # 行业概览（主页卡片）
 # ─────────────────────────────────────────
 def get_us_market_overview() -> list:
-    """获取美股几个核心指数/行业的简要数据"""
+    """获取美股几个核心指数 ETF 的简要数据"""
     tickers = ["SPY", "QQQ", "DIA", "IWM"]
     labels = ["S&P 500", "NASDAQ 100", "Dow Jones", "Russell 2000"]
     results = []
 
     for ticker, label in zip(tickers, labels):
+        item = {"label": label, "ticker": ticker, "price": None, "change_pct": None}
+
+        # 优先用 history 拉最近的价格（比 info 稳定得多）
         try:
             stock = yf.Ticker(ticker)
-            info = stock.info
-            price = info.get("regularMarketPrice") or info.get("previousClose", 0)
-            change = info.get("regularMarketChangePercent", 0) or 0
-            results.append({
-                "label": label,
-                "ticker": ticker,
-                "price": _round(price),
-                "change_pct": _round(change, 2),
-            })
+            hist = _retry(lambda: stock.history(period="5d"), retries=2)
+
+            if hist is not None and not hist.empty and len(hist) >= 2:
+                latest_close = hist["Close"].iloc[-1]
+                prev_close = hist["Close"].iloc[-2]
+                change_pct = (latest_close - prev_close) / prev_close * 100
+                item["price"] = _round(latest_close)
+                item["change_pct"] = _round(change_pct, 2)
+            elif hist is not None and not hist.empty:
+                item["price"] = _round(hist["Close"].iloc[-1])
+                item["change_pct"] = 0
         except Exception:
-            results.append({"label": label, "ticker": ticker, "price": None, "change_pct": None})
+            pass
+
+        results.append(item)
 
     return results
 
@@ -319,28 +336,20 @@ def get_cn_market_overview() -> list:
     ]
     results = []
 
-    try:
-        df = ak.stock_zh_index_spot_em(symbol="上证系列指数")
-        for code, label in indices:
+    df = _retry(lambda: ak.stock_zh_index_spot_em(symbol="上证系列指数"), retries=1)
+
+    for code, label in indices:
+        item = {"label": label, "ticker": code, "price": None, "change_pct": None}
+        if df is not None:
             try:
-                # 简化处理：直接查询
                 row = df[df["代码"] == code]
                 if not row.empty:
                     r = row.iloc[0]
-                    results.append({
-                        "label": label,
-                        "ticker": code,
-                        "price": _round(r.get("最新价")),
-                        "change_pct": _round(r.get("涨跌幅"), 2),
-                    })
-                else:
-                    results.append({"label": label, "ticker": code, "price": None, "change_pct": None})
+                    item["price"] = _round(r.get("最新价"))
+                    item["change_pct"] = _round(r.get("涨跌幅"), 2)
             except Exception:
-                results.append({"label": label, "ticker": code, "price": None, "change_pct": None})
-    except Exception:
-        # 失败时返回占位数据
-        for code, label in indices:
-            results.append({"label": label, "ticker": code, "price": None, "change_pct": None})
+                pass
+        results.append(item)
 
     return results
 
@@ -349,7 +358,6 @@ def get_cn_market_overview() -> list:
 # 工具函数
 # ─────────────────────────────────────────
 def _round(val, digits: int = 2):
-    """安全四舍五入"""
     if val is None or pd.isna(val):
         return None
     try:
@@ -359,7 +367,6 @@ def _round(val, digits: int = 2):
 
 
 def _to_billion(val):
-    """美元数值 → 十亿单位"""
     if val is None or pd.isna(val):
         return None
     try:
@@ -369,7 +376,6 @@ def _to_billion(val):
 
 
 def _to_yi(val):
-    """人民币数值 → 亿元单位"""
     if val is None or pd.isna(val):
         return None
     try:
@@ -379,12 +385,10 @@ def _to_yi(val):
 
 
 def _find_year_column(columns, year: str):
-    """在 yfinance 财报的列中找到对应年份的列"""
     for col in columns:
         try:
             if hasattr(col, "year") and str(col.year) == str(year):
                 return col
         except Exception:
             continue
-    # 退而求其次：返回最近的一列
     return columns[0] if len(columns) > 0 else None

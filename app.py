@@ -68,19 +68,14 @@ with st.sidebar:
 
 
 # ─────────────────────────────────────────
-# 主页头部
+# 主页头部（永远显示）
 # ─────────────────────────────────────────
 st.title(t("app_title", lang))
 st.caption(t("app_subtitle", lang))
 
-# 检查配置
-if not llm_api_key:
-    st.info(t("config_prompt", lang))
-    st.stop()
-
 
 # ─────────────────────────────────────────
-# 市场概览（主页卡片）
+# 市场概览（无需 API Key 即可查看）
 # ─────────────────────────────────────────
 st.subheader(t("industry_overview", lang))
 
@@ -120,9 +115,15 @@ st.divider()
 
 
 # ─────────────────────────────────────────
-# 聊天主区域
+# 聊天主区域（需要 API Key）
 # ─────────────────────────────────────────
 st.subheader(t("chat_title", lang))
+
+# 没填 API Key 时，显示友好提示但不阻塞页面
+if not llm_api_key:
+    st.info(t("config_prompt", lang))
+    st.stop()
+
 st.caption(t("chat_hint", lang))
 
 # 初始化对话历史
@@ -171,6 +172,7 @@ if user_input:
             analysis_types = intent.get("analysis_types", ["financial", "valuation", "risk"])
             types_display = ", ".join([type_labels.get(t_, t_) for t_ in analysis_types])
             period = intent.get("period", "2024")
+            market_hint = intent.get("market", "us")
 
             st.info(
                 t(
@@ -183,14 +185,17 @@ if user_input:
                 )
             )
 
-            # 第二步：拉取数据
+            # 第二步：拉取数据（即使 company_info 失败也尝试拉取财务数据）
             with st.spinner(t("fetching_data", lang)):
                 company_info = get_company_info(ticker)
+
+                # 即使没拿到详细公司信息，也用 LLM 给的信息构造一个最小数据
                 if not company_info:
-                    reply = t("company_not_found", lang, name=company_name or ticker)
-                    st.error(reply)
-                    st.session_state.messages.append({"role": "assistant", "content": reply})
-                    st.stop()
+                    company_info = {
+                        "ticker": ticker,
+                        "market": market_hint or "us",
+                        "name": company_name or ticker,
+                    }
 
                 financial_data = get_financial_data(ticker, period)
                 market = company_info["market"]
