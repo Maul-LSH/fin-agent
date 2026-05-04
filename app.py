@@ -46,42 +46,44 @@ lang = st.session_state.lang
 # ─────────────────────────────────────────
 # 缓存
 # ─────────────────────────────────────────
-@st.cache_data(ttl=300)
+# 大盘指数和板块数据：30 分钟刷新一次（白天交易时段足够及时）
+@st.cache_data(ttl=1800)
 def cached_us_market():
     return get_us_market_overview()
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)
 def cached_cn_market():
     return get_cn_market_overview()
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)
 def cached_us_industry():
     return get_us_industry_sectors()
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)
 def cached_us_size():
     return get_us_size_sectors()
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)
 def cached_cn_industry():
     return get_cn_industry_sectors()
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=1800)
 def cached_cn_region():
     return get_cn_region_sectors()
 
 
-@st.cache_data(ttl=600)
+# 历史趋势：1 小时缓存（90 天的数据变化没那么频繁）
+@st.cache_data(ttl=3600)
 def cached_us_history(ticker: str):
     return get_us_sector_history(ticker)
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=3600)
 def cached_cn_history(name: str):
     return get_cn_sector_history(name)
 
