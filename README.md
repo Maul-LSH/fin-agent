@@ -4,6 +4,8 @@
 >
 > AI 驱动的股票财务分析工具 · 支持美股和 A 股 · 完全开源
 
+**🌐 Live Demo / 在线体验**: [https://fin-agent-sihao.streamlit.app](https://fin-agent-sihao.streamlit.app)
+
 Bring your own LLM API key. No accounts, no servers, no tracking.
 
 ---
@@ -21,7 +23,13 @@ Bring your own LLM API key. No accounts, no servers, no tracking.
 
 ## 🚀 Quick Start
 
-### 1. Get an LLM API Key
+### Option 1: Use the live demo (easiest)
+
+Just open [fin-agent-sihao.streamlit.app](https://fin-agent-sihao.streamlit.app) and enter your LLM API key in the sidebar.
+
+### Option 2: Run locally
+
+#### 1. Get an LLM API Key
 
 Choose ONE of:
 
@@ -31,13 +39,15 @@ Choose ONE of:
 | **OpenAI** | [platform.openai.com](https://platform.openai.com) | GPT-4o |
 | **DeepSeek** | [platform.deepseek.com](https://platform.deepseek.com) | Cheapest option |
 
-### 2. Install
+#### 2. Clone and install
 
 ```bash
+git clone https://github.com/Maul-LSH/fin-agent.git
+cd fin-agent
 pip install -r requirements.txt
 ```
 
-### 3. Run
+#### 3. Run
 
 ```bash
 streamlit run app.py
@@ -75,6 +85,8 @@ fin-agent/
 ## ⚠️ Disclaimer
 
 This tool is for **educational purposes only**. All output is AI-generated commentary on public financial data and **does not constitute investment advice**. Stock investments carry risk.
+
+本工具仅供学习使用，所有输出均为 AI 基于公开财务数据的评论，**不构成投资建议**。股市有风险，投资需谨慎。
 
 ---
 
